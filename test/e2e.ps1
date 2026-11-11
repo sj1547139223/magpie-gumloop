@@ -141,6 +141,7 @@ try {
   Mock '/_mode' @{ mode = 'ok' } | Out-Null
 } finally {
   if ($serve -and -not $serve.HasExited) { Stop-Process -Id $serve.Id -Force }
+  Get-NetTCPConnection -LocalPort 3498 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }
   if (-not $mockProc.HasExited) { Stop-Process -Id $mockProc.Id -Force }
 }
 Write-Output ''

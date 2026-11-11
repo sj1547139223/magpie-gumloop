@@ -76,6 +76,10 @@ try {
   Check 'non-streaming chat' ($r.status -eq 200 -and $r.body -match 'pong from claude-sonnet-5-5') "$($r.status) $($r.body)"
   $r = Chat 'gumloop/claude-sonnet-5-5' @{ stream = $true }
   Check 'streaming chat' ($r.status -eq 200 -and $r.body -match 'pong') "$($r.status) $($r.body)"
+  Mock '/_mode' @{ mode = 'octet-stream' } | Out-Null
+  $r = Chat 'gumloop/claude-sonnet-5-5' @{ stream = $true }
+  Check 'streaming with an octet-stream content type' ($r.status -eq 200 -and $r.body -match 'pong') "$($r.status) $($r.body)"
+  Mock '/_mode' @{ mode = 'ok' } | Out-Null
   $r = Chat 'gumloop/gpt-6-sol' @{ max_completion_tokens = 50; store = $true; reasoning_effort = 'high' }
   Check 'gpt chat' ($r.status -eq 200) "$($r.status) $($r.body)"
   $r = Chat 'gumloop/glm-5p3'
@@ -86,7 +90,7 @@ try {
   $log = @(Mock '/_log')
   $sent = @($log | ForEach-Object { $_.body })
   Check 'every request carries the user id' (@($log | Where-Object { $_.headers.'x-auth-key' -ne $user }).Count -eq 0)
-  Check 'claude gets a 1h cache' ($sent[0].cache_control.ttl -eq '1h')
+  Check 'claude does not opt into a 1h cache by default' ($null -eq $sent[0].cache_control)
   Check 'usage is asked for when streaming' ($sent[1].stream_options.include_usage -eq $true)
   $gpt = @($sent | Where-Object { $_.model -eq 'gpt-6-sol' })[0]
   Check 'gpt body is normalized' ($gpt.max_tokens -eq 50 -and $null -eq $gpt.max_completion_tokens -and $null -eq $gpt.store -and $gpt.reasoning.effort -eq 'high') ($gpt | ConvertTo-Json -Compress)
@@ -102,7 +106,21 @@ try {
   $cred = @($q.windows | Where-Object { $_.name -eq 'Credits' })[0]
   $month = @($q.windows | Where-Object { $_.name -eq 'This month via magpie' })[0]
   Check 'the balance goes down by what was spent' ($cred.balance -eq (5000 - $month.amount) -and $month.amount -gt 0) ($q.windows | ConvertTo-Json -Compress)
-  Check 'calls are counted' ($month.display -match '\b6 calls') $month.display
+  Check 'calls include the octet-stream response' ($month.display -match '\b7 calls') $month.display
+
+  Write-Output '--- unrelated refusals keep the account and balance'
+  $balanceBefore = $cred.balance
+  Mock '/_mode' @{ mode = 'plan' } | Out-Null
+  $r = Chat 'gumloop/claude-opus-5-5'
+  Check 'a plan refusal keeps its 403 status' ($r.status -eq 403) "$($r.status) $($r.body)"
+  $list = & $magpie plugin 2>&1 | Out-String
+  Check 'a plan refusal does not expire the sign-in' ($list -match 'signed in as mock@example.com') $list
+  Mock '/_mode' @{ mode = 'upstream-credits' } | Out-Null
+  $r = Chat 'gumloop/claude-sonnet-5-5'
+  Check 'upstream provider credits keep the original 400' ($r.status -eq 400) "$($r.status) $($r.body)"
+  $q = Quota
+  $cred = @($q.windows | Where-Object { $_.name -eq 'Credits' })[0]
+  Check 'unrelated refusals do not zero the balance' ($cred.balance -eq $balanceBefore -and $cred.balance -gt 0) ($q | ConvertTo-Json -Depth 5 -Compress)
 
   Write-Output '--- out of credits'
   Mock '/_mode' @{ mode = 'credits' } | Out-Null

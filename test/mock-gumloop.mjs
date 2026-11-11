@@ -9,7 +9,8 @@
 //   GUMLOOP_OPENROUTER_BASE=http://127.0.0.1:<port>/or
 //
 // The test key and user id are below. GET /_log returns every chat request it
-// got (headers and body); POST /_mode {"mode": "ok" | "credits" | "badkey"}
+// got (headers and body); POST /_mode selects ok, credits, badkey,
+// plan, upstream-credits or octet-stream.
 // changes how chat answers; POST /_reset clears the log.
 import * as http from "node:http"
 
@@ -95,14 +96,16 @@ http
       } catch {}
       log.push({ at: Date.now(), headers: req.headers, body })
       if (!authed(req) || mode === "badkey") return send(res, 403, { error: "Invalid API key" })
-      if (mode === "credits") return send(res, 403, { error: "credit_limit_exceeded", message: "You have reached your credit limit." })
+      if (mode === "credits") return send(res, 403, { error: { code: "credit_limit_exceeded", message: "You have reached your credit limit." } })
+      if (mode === "plan") return send(res, 403, { error: { message: "You are not authorized to use claude-opus-5-5 on your current plan" } })
+      if (mode === "upstream-credits") return send(res, 400, { error: { message: "anthropic: Your credit balance is too low to access the Anthropic API." } })
       if (String(body.model).startsWith("claude-sonnet") && body.max_tokens > 64000) {
         return send(res, 400, { error: { code: "provider_error", message: `max_tokens: ${body.max_tokens} > 64000, which is the maximum allowed number of output tokens for ${body.model}` } })
       }
       const id = `chatcmpl-${log.length}`
       const reply = `pong from ${body.model}`
       if (body.stream) {
-        res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8" })
+        res.writeHead(200, { "content-type": mode === "octet-stream" ? "application/octet-stream" : "text/event-stream; charset=utf-8" })
         const frame = (o) => `data: ${JSON.stringify(o)}\n\n`
         res.write(frame({ id, object: "chat.completion.chunk", model: body.model, choices: [{ index: 0, delta: { role: "assistant", content: "" } }] }))
         for (const w of reply.split(" ")) {

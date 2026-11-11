@@ -4,10 +4,13 @@
   "description": "Gumloop (gumloop.com) with your API key and user id in OpenCode and magpie: per-account models, and a credit estimate Gumloop's API doesn't give",
   "homepage": "https://www.gumloop.com/",
   "type": "module",
-  "main": "./index.mjs",
+  "main": "./opencode.mjs",
+  "exports": { ".": "./opencode2.mjs" },
   "files": [
     "index.mjs",
     "gumloop.mjs",
+    "opencode.mjs",
+    "opencode2.mjs",
     "README.md",
     "LICENSE"
   ],

@@ -34,8 +34,15 @@ image, voice, transcription and classifier models are left out. Context is the
 model's short window where Gumloop gives one, since every call bills the whole
 context.
 
-Model ids drop Gumloop's path (`gumloop/glm-5p3` is
-`accounts/fireworks/models/glm-5p3`); the plugin sends the full id.
+Model ids use the account catalog's names, such as `gumloop/glm-5.3`.
+The plugin translates these to the chat endpoint's route IDs (for example,
+`accounts/fireworks/models/glm-5p3`). Older aliases such as `glm-5p3` still work.
+
+MiniMax M3 is temporarily omitted: on 2026-11-11 Gumloop's route rejected even
+minimal requests with `Extra inputs are not permitted, field: 'provider'`.
+MiniMax M3.1 Flash is supported. Muse and MiniMax M3.1 Flash require a nonempty
+system message; if none is supplied, the plugin adds "You are a helpful assistant."
+Existing nonempty system instructions are preserved.
 
 Requests are rewritten the way Gumloop takes them: `max_completion_tokens` becomes
 `max_tokens`, `reasoning_effort` becomes `reasoning.effort`, streams ask for their
@@ -49,10 +56,17 @@ that off with `{"cache1h": false}` in the plugin's options.
 Gumloop's API has no balance endpoint, so the usage card is an **estimate**:
 
 - each call is priced from its token usage at list price (OpenRouter's prices,
-  re-read every 12 hours; Fireworks-hosted models at Fireworks' price; built-in
+  re-read every 12 hours; Fireworks-hosted models at the standard Fireworks
+  endpoint price, excluding spot tiers; Z.AI and Gemma use their provider
+  endpoints; built-in
   prices when OpenRouter can't be reached), at $0.005 a credit, rounded up to a
   whole credit per call, as Gumloop bills;
 - the result is taken off the balance you gave, from when you gave it.
+
+Prices and rounding are estimates, not a reconciliation with Gumloop's invoice.
+Provider discounts, routing changes and unavailable live long-context rates can
+make the estimate differ. Models with no known price are counted as unpriced,
+not as free calls.
 
 Spend on gumloop.com itself (flows, Gumball) shows only when you calibrate again.
 A stream stopped mid-way never reports its usage; the card counts those so you
@@ -82,6 +96,8 @@ magpie quota
 ```
 
 In OpenCode, add the package under `plugin` and sign in with `opencode auth login`.
+The package includes separate OpenCode 1.x and 2.x entrypoints; email and balance
+remain optional in both login flows.
 
 ## Development
 

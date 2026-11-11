@@ -15,31 +15,58 @@ export const EXHAUSTED_FOR = 12 * 60 * 60 * 1000
 
 // USD per million tokens [input, output, cacheRead, cacheWrite], used until
 // (or when) OpenRouter's list cannot be read. cacheWrite null = billed as input.
-// From vwfactory-dsh (2026-10), which measured them against Gumloop's bills.
+// From vwfactory-dsh (2026-10), supplemented with OpenRouter provider rates
+// checked on 2026-11-11. These are estimates, not a Gumloop balance API.
 export const FALLBACK_PRICES = {
   "claude-fable-5-1": [10, 50, 0.25, 12.5],
+  "claude-fable-5": [10, 50, 1, 12.5],
+  "claude-opus-5": [5, 25, 0.5, 6.25],
+  "claude-sonnet-5": [2, 10, 0.2, 2.5],
+  "claude-haiku-4-5": [1, 5, 0.1, 1.25],
   "claude-opus-5-5": [4, 20, 0.2, 5],
   "claude-sonnet-5-5": [2, 10, 0.1, 2.5],
   "claude-haiku-5-5": [0.1, 0.5, 0.01, 0.125],
   "gpt-6-astra": [10, 50, 1, 12.5],
   "gpt-6.1-sol": [2, 10, 0.1, 2.5],
+  "gpt-6.1-terra": [1, 5, 0.05, 1.25],
   "gpt-6-sol": [2, 10, 0.2, 2.5],
   "gpt-6-luna": [0.1, 0.5, 0.01, 0.125],
   "grok-4.7": [2, 6, 0.5, null],
   "grok-4.6": [2, 6, 0.5, null],
   "meta/muse-spark-1.3": [1.25, 4.25, 0.15, null],
+  "meta/muse-wonder-1.0": [4, 20, 0.2, null],
+  "minimax/minimax-m3.1-flash": [0.15, 0.6, 0.015, null],
   "accounts/fireworks/models/glm-5p3": [1.4, 4.4, 0.26, null],
   "z-ai/glm-5.3-flash": [0.15, 0.5, 0.03, null],
   "accounts/fireworks/routers/kimi-k3-us": [3, 15, 0.3, null],
   "accounts/fireworks/models/kimi-k2p7-code": [0.95, 4, 0.19, null],
   "gemini-4-argon": [2, 10, 0.1, 0.1875],
   "gemini-3.1-pro-preview": [2, 12, 0.2, 0.375],
-  "gemini-3.8-flash": [0.75, 3.75, 0.075, 0.0417],
-  "google/gemma-4-26b-a4b-it": [0.09, 0.3, 0.05, null],
+  "gemini-3.8-flash": [0.825, 4.125, 0.0825, 0.04166666667],
+  "gemini-3.7-flash": [0.75, 3.75, 0.075, 0.04166666667],
+  "google/gemma-4-26b-a4b-it": [0.15, 0.6, null, null],
   "accounts/fireworks/models/deepseek-v4p1-flash": [0.3, 1.2, 0.006, null],
   "accounts/fireworks/models/deepseek-v4-pro-0813": [1.32, 3.96, 0.044, null],
   "accounts/fireworks/models/minimax-m3": [0.3, 1.2, 0.06, null],
 }
+
+// /models uses catalog names; /chat/completions still requires these routes.
+// Verified against both Gumloop endpoints on 2026-11-11.
+export const MODEL_ROUTES = {
+  "glm-5.3": "accounts/fireworks/models/glm-5p3",
+  "glm-5.3-flash": "z-ai/glm-5.3-flash",
+  "kimi-k3": "accounts/fireworks/routers/kimi-k3-us",
+  "deepseek-v4.1-flash": "accounts/fireworks/models/deepseek-v4p1-flash",
+  "gemma-4-26b-a4b-it": "google/gemma-4-26b-a4b-it",
+  "muse-spark-1.3": "meta/muse-spark-1.3",
+  "muse-wonder-1.0": "meta/muse-wonder-1.0",
+  "minimax-m3": "accounts/fireworks/models/minimax-m3",
+  "minimax-m3.1-flash": "minimax/minimax-m3.1-flash",
+}
+export const wireModel = (id) => Object.hasOwn(MODEL_ROUTES, id) ? MODEL_ROUTES[id] : id
+// Gumloop currently injects an unsupported `provider` field for this route.
+// Keep it out of offered models until the upstream route is repaired.
+export const availableModel = (id) => wireModel(id) !== "accounts/fireworks/models/minimax-m3"
 
 const VENDORS = [
   [/^claude-/, "anthropic", "Anthropic"],
@@ -51,6 +78,7 @@ const VENDORS = [
   [/^kimi-/, "moonshotai", "Moonshot AI"],
   [/^minimax-/, "minimax", "Minimax"],
   [/^qwen/, "qwen", "Alibaba"],
+  [/^muse-/, "meta", "Meta"],
 ]
 
 export const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v)
@@ -72,6 +100,7 @@ export function parseModels(body) {
       const caps = Array.isArray(o.metadata?.capabilities) ? o.metadata.capabilities : []
       if (o.status !== "active" || o.restricted || o.is_classifier_model || o.is_image_generation || o.is_voice || o.is_transcription) continue
       if (!caps.includes("functions") || o.value === "gumloop-chew") continue
+      if (!availableModel(o.value)) continue
       out.push({
         id: o.value,
         name: typeof o.label === "string" && o.label ? o.label : o.value,
@@ -91,20 +120,24 @@ export function parseModels(body) {
 // Fireworks-hosted ones ("accounts/fireworks/models/glm-5p3") are priced at
 // Fireworks' endpoint, which is what Gumloop pays, not OpenRouter's cheapest.
 export function priceRef(id) {
+  id = wireModel(id)
   const fireworks = /^accounts\/fireworks\//.test(id)
   let bare = id.replace(/^accounts\/fireworks\/(models|routers)\//, "")
-  if (bare.includes("/")) return { orIds: [...new Set([bare, bare.replace(/-\d+(\.\d+)*$/, "")])], fireworks: false }
+  if (bare.includes("/")) {
+    const provider = bare.startsWith("z-ai/") ? "Z.AI" : bare.startsWith("google/gemma-") ? "Google Vertex" : undefined
+    return { orIds: [...new Set([bare, bare.replace(/-\d+(\.\d+)*$/, "")])], fireworks: false, provider }
+  }
   bare = bare.replace(/(\d)p(\d)/g, "$1.$2").replace(/-us$/, "")
   const dotted = bare.replace(/(\d)-(\d)/g, "$1.$2")
   const v = VENDORS.find(([re]) => re.test(bare))
   const orIds = v ? [`${v[1]}/${dotted}`, `${v[1]}/${bare}`] : [dotted, bare]
-  return { orIds: [...new Set(orIds)], fireworks, vendorName: v?.[2] }
+  return { orIds: [...new Set(orIds)], fireworks, vendorName: v?.[2], provider: fireworks ? "Fireworks" : undefined }
 }
 
 function perMillion(p) {
   const n = (x) => (x === undefined || x === null || x === "" ? null : Number((Number(x) * 1e6).toPrecision(10)))
   const out = [n(p.prompt), n(p.completion), n(p.input_cache_read), n(p.input_cache_write)]
-  return out[0] === null || out[1] === null || !Number.isFinite(out[0]) ? undefined : out
+  return out[0] === null || out[1] === null || out.some((x) => x !== null && (!Number.isFinite(x) || x < 0)) ? undefined : out
 }
 
 // priceEntry reads one OpenRouter pricing block, with its long-context tier.
@@ -131,19 +164,17 @@ export async function fetchPrices(fetchImpl, ids) {
     const orId = ref.orIds.find((x) => byId.has(x))
     if (!orId) continue
     let entry
-    if (ref.fireworks) {
+    if (ref.provider) {
       try {
         const er = await fetchImpl(`${OPENROUTER}/models/${orId}/endpoints`, { signal: AbortSignal.timeout(20000) })
         const eps = er.ok ? ((await er.json())?.data?.endpoints ?? []) : []
-        const pick = (name) =>
-          eps
-            .filter((e) => e?.provider_name === name && priceEntry(e.pricing))
-            .sort((a, b) => Number(a.pricing.prompt) - Number(b.pricing.prompt))[0]
-        const ep = pick("Fireworks") ?? (ref.vendorName ? pick(ref.vendorName) : undefined)
+        const ep = eps.find((e) => e?.provider_name === ref.provider && priceEntry(e.pricing) &&
+          (ref.provider !== "Fireworks" || !e.tag || e.tag === "fireworks"))
         if (ep) entry = priceEntry(ep.pricing)
       } catch {
-        // the headline price below stands in
+        // Keep the known route's fallback, not another host's headline price.
       }
+      if (!entry) continue
     }
     entry ??= priceEntry(byId.get(orId).pricing)
     if (entry) table[id] = { ...entry, ref: orId }
@@ -266,14 +297,15 @@ export class Store {
     return isObj(p) && isObj(p.table) ? p : { at: 0, table: {} }
   }
 
-  setPrices(table) {
+  setPrices(table, ids = Object.keys(table)) {
     const d = this.read()
-    d.prices = { at: this.now(), table }
+    d.prices = { at: this.now(), table, ids, version: 2 }
     this.write(d)
   }
 
   // price is the live entry for a model, else the built-in one.
   price(model) {
+    model = wireModel(model)
     const live = this.prices().table[model]
     if (live?.p) return live
     const fb = FALLBACK_PRICES[model]

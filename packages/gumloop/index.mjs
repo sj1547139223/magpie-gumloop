@@ -20,12 +20,14 @@ import {
   FALLBACK_PRICES,
   PRICES_TTL,
   Store,
+  availableModel,
   creditsFor,
   fetchPrices,
   gumloopHeaders,
   isObj,
   parseModels,
   usageCost,
+  wireModel,
 } from "./gumloop.mjs"
 
 const ID = "gumloop"
@@ -84,6 +86,16 @@ function row(m, alias, entry) {
 
 // normalize rewrites a chat completions body the way Gumloop takes it.
 function normalize(body, { cache1h }) {
+  // These upstream routes reject the empty system prompt Gumloop otherwise
+  // supplies. Preserve every nonempty caller instruction.
+  if (/^(meta\/muse-|minimax\/minimax-m3\.1-flash$)/.test(String(body.model)) && Array.isArray(body.messages)) {
+    const nonempty = (content) => typeof content === "string" ? !!content.trim() :
+      Array.isArray(content) && content.some((p) => typeof p?.text === "string" && p.text.trim())
+    body.messages = body.messages.filter((m) => m.role !== "system" || nonempty(m.content))
+    if (!body.messages.some((m) => m.role === "system")) {
+      body.messages.unshift({ role: "system", content: "You are a helpful assistant." })
+    }
+  }
   if (body.stream === true) body.stream_options = { ...(isObj(body.stream_options) ? body.stream_options : {}), include_usage: true }
   else delete body.stream_options
   if (body.max_completion_tokens !== undefined) {
@@ -112,9 +124,11 @@ function tapUsage(stream, isSse, signal, done) {
   let usage
   let tooBig = false
   let finished = false
+  const aborted = () => finish(true)
   const finish = (cut) => {
     if (finished) return
     finished = true
+    signal?.removeEventListener("abort", aborted)
     done(usage, cut)
   }
   const take = (o) => {
@@ -129,9 +143,9 @@ function tapUsage(stream, isSse, signal, done) {
       take(JSON.parse(d))
     } catch {}
   }
-  signal?.addEventListener("abort", () => finish(true), { once: true })
-  return stream.pipeThrough(
-    new TransformStream({
+  signal?.addEventListener("abort", aborted, { once: true })
+  if (signal?.aborted) aborted()
+  const tap = new TransformStream({
       transform(chunk, ctl) {
         ctl.enqueue(chunk)
         const s = dec.decode(chunk, { stream: true })
@@ -162,8 +176,11 @@ function tapUsage(stream, isSse, signal, done) {
         buf = ""
         finish(false)
       },
-    }),
-  )
+    })
+  // Unlike pipeThrough, observing pipeTo also catches source failures and
+  // consumer cancellation. The readable still propagates the original error.
+  stream.pipeTo(tap.writable).catch(() => finish(true))
+  return tap.readable
 }
 
 const errorJson = (status, message, type, headers = {}) =>
@@ -216,11 +233,12 @@ function createPlugin({ directory, options = {}, fetchImpl = globalThis.fetch, n
   // refreshPrices re-reads OpenRouter's list at most every PRICES_TTL; a
   // failure keeps the table there was (or the built-in prices).
   function refreshPrices() {
-    if (now() - store.prices().at < PRICES_TTL) return Promise.resolve()
+    const ids = [...new Set(realIds.values())]
+    const cached = store.prices()
+    if (cached.version === 2 && now() - cached.at < PRICES_TTL && ids.every((id) => cached.ids?.includes(id))) return Promise.resolve()
     pricing ??= (async () => {
-      const ids = [...new Set(realIds.values())]
       const table = await fetchPrices((u, i) => fetchImpl(u.replace(DEFAULT_OPENROUTER, OPENROUTER), i), ids)
-      if (Object.keys(table).length) store.setPrices({ ...store.prices().table, ...table })
+      store.setPrices(table, ids)
     })()
       .catch(() => {})
       .finally(() => {
@@ -286,7 +304,7 @@ function createPlugin({ directory, options = {}, fetchImpl = globalThis.fetch, n
       for (const [k, v] of Object.entries(gumloopHeaders(cred.key, cred.userId))) headers.set(k, v)
       return fetchImpl(url, { ...init, headers })
     }
-    const model = realIds.get(body.model) ?? body.model
+    const model = wireModel(realIds.get(body.model) ?? body.model)
     body.model = model
     normalize(body, { cache1h })
     const cap = maxOut.get(model)
@@ -342,13 +360,14 @@ function createPlugin({ directory, options = {}, fetchImpl = globalThis.fetch, n
   return {
     config: async (cfg) => {
       cfg.provider ??= {}
-      const aliases = aliasesFor(Object.keys(FALLBACK_PRICES))
+      const ids = Object.keys(FALLBACK_PRICES).filter(availableModel)
+      const aliases = aliasesFor(ids)
       cfg.provider[ID] ??= {
         name: "Gumloop",
         npm: NPM, // chat completions
         api: WS,
         models: Object.fromEntries(
-          Object.keys(FALLBACK_PRICES).map((id) => {
+          ids.map((id) => {
             const alias = aliases.get(id)
             const m = { id, name: pretty(id), reasoning: /^claude-(opus|fable)/.test(id) }
             return [alias, row(m, alias, { p: FALLBACK_PRICES[id] })]
@@ -383,11 +402,13 @@ function createPlugin({ directory, options = {}, fetchImpl = globalThis.fetch, n
             {
               type: "text",
               key: "email",
+              required: false,
               message: "Account email (optional; names the account in magpie)",
             },
             {
               type: "text",
               key: "balance",
+              required: false,
               message: "Credits left, as gumloop.com shows them (optional; starts the estimate)",
               validate: (v) => (!String(v ?? "").trim() || creditsOf(v) !== undefined ? undefined : "A number of credits, such as 7142"),
             },
@@ -505,7 +526,7 @@ function createPlugin({ directory, options = {}, fetchImpl = globalThis.fetch, n
           throw new Error(e?.message || "Gumloop sent no model list")
         }
         const aliases = aliasesFor(list.map((m) => m.id))
-        for (const [id, alias] of aliases) realIds.set(alias, id)
+        for (const [id, alias] of aliases) realIds.set(alias, wireModel(id))
         await refreshPrices()
         return Object.fromEntries(list.map((m) => [aliases.get(m.id), row(m, aliases.get(m.id), store.price(m.id))]))
       },
